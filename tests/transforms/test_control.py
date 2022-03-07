@@ -309,3 +309,102 @@ def test_controlled_template_and_operations():
     tape = expand_tape(tape)
     assert len(tape.operations) == 10
     assert all(o.name in {"CNOT", "CRX", "Toffoli"} for o in tape.operations)
+
+
+def test_control_with_control_values():
+    """Test that control with control values works on a very standard usecase."""
+
+    def make_ops():
+        qml.RX(0.123, wires=0)
+        qml.RY(0.456, wires=2)
+        qml.RX(0.789, wires=0)
+        qml.Rot(0.111, 0.222, 0.333, wires=2),
+        qml.PauliX(wires=2)
+        qml.PauliY(wires=4)
+        qml.PauliZ(wires=0)
+
+    with QuantumTape() as tape:
+        cmake_ops = ctrl(make_ops, control=1, control_values=0)
+        # Execute controlled version.
+        cmake_ops()
+
+    expected = [
+        qml.PauliX(wires=[1]),
+        qml.CRX(0.123, wires=[1, 0]),
+        qml.CRY(0.456, wires=[1, 2]),
+        qml.CRX(0.789, wires=[1, 0]),
+        qml.CRot(0.111, 0.222, 0.333, wires=[1, 2]),
+        qml.CNOT(wires=[1, 2]),
+        qml.CY(wires=[1, 4]),
+        qml.CZ(wires=[1, 0]),
+        qml.PauliX(wires=[1]),
+    ]
+    assert len(tape.operations) == 1
+    ctrl_op = tape.operations[0]
+    assert isinstance(ctrl_op, ControlledOperation)
+    expanded = ctrl_op.expand()
+    assert_equal_operations(expanded.operations, expected)
+
+
+def test_adjoint_of_control_with_control_values():
+    """Test adjoint(ctrl(fn)) and ctrl(adjoint(fn)) for control_values not None"""
+
+    def my_op(a, b, c):
+        qml.RX(a, wires=2)
+        qml.RY(b, wires=3)
+        qml.RZ(c, wires=0)
+
+    with QuantumTape() as tape1:
+        cmy_op_dagger = qml.adjoint(ctrl(my_op, 5, control_values=0))
+        # Execute controlled and adjointed version of my_op.
+        cmy_op_dagger(0.789, 0.123, c=0.456)
+
+    with QuantumTape() as tape2:
+        cmy_op_dagger = ctrl(qml.adjoint(my_op), 5, control_values=0)
+        # Execute adjointed and controlled version of my_op.
+        cmy_op_dagger(0.789, 0.123, c=0.456)
+
+    expected = [
+        qml.PauliX(wires=5),
+        qml.CRZ(-0.456, wires=[5, 0]),
+        qml.CRY(-0.123, wires=[5, 3]),
+        qml.CRX(-0.789, wires=[5, 2]),
+        qml.PauliX(wires=5),
+    ]
+    for tape in [tape1, tape2]:
+        assert len(tape.operations) == 1
+        ctrl_op = tape.operations[0]
+        assert isinstance(ctrl_op, ControlledOperation)
+        expanded = ctrl_op.expand()
+        assert_equal_operations(expanded.operations, expected)
+
+
+def test_multi_control_with_control_values():
+    """Test control with a list of wires and different control values."""
+
+    ctrl_val_list = [[0, 0], [0, 1], [1, 0], [1, 1]]
+
+    def expected_ops(ctrl_vals):
+        exp_ops = []
+        if not bool(ctrl_vals[0]):
+            exp_ops.append(qml.PauliX(wires=3))
+        if not bool(ctrl_vals[1]):
+            exp_ops.append(qml.PauliX(wires=7))
+        exp_ops.append(qml.Toffoli(wires=[7, 3, 0]))
+        if not bool(ctrl_vals[0]):
+            exp_ops.append(qml.PauliX(wires=3))
+        if not bool(ctrl_vals[1]):
+            exp_ops.append(qml.PauliX(wires=7))
+
+        return exp_ops
+
+    for ctrl_vals in ctrl_val_list:
+        with QuantumTape() as tape:
+            CCX = ctrl(qml.PauliX, control=[3, 7], control_values=ctrl_vals)
+            CCX(wires=0)
+        assert len(tape.operations) == 1
+        op = tape.operations[0]
+        assert isinstance(op, ControlledOperation)
+        new_tape = expand_tape(tape, 1)
+
+        assert_equal_operations(new_tape.operations, expected_ops(ctrl_vals))
